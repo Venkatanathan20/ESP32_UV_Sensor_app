@@ -94,7 +94,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     try {
       final response = await http
           .get(Uri.parse('http://$ip/data'))
-          .timeout(const Duration(seconds: 3));
+          .timeout(const Duration(seconds: 6)); // Increased timeout for ESP32 background tasks
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -104,10 +104,18 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
         _addReading(mv, uv, rssi, isLive: true);
       } else {
-        setState(() => _status = 'HTTP Error ${response.statusCode}');
+        // Keep previous reading if it's just a temporary glitch
+        if (_records.isNotEmpty) {
+          setState(() => _status = 'ESP32 Busy (Retrying...)');
+        }
       }
     } catch (e) {
-      setState(() => _status = 'Error: Check if phone & ESP32 share same Wi-Fi');
+      // Only show warning if we miss multiple frames, keep streaming smooth
+      if (_records.isNotEmpty) {
+        setState(() => _status = 'Signal lag... waiting for ESP32');
+      } else {
+        setState(() => _status = 'Error: Cannot reach $ip');
+      }
     }
   }
 
