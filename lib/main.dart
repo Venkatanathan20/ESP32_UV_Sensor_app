@@ -379,7 +379,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
   Widget _metricCard(String title, String value, Color color) {
     return Container(
-      path: const EdgeInsets.all(14), // fixed syntax
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: const Color(0xFF1E293B),
