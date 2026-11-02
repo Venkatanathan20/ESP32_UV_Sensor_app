@@ -50,7 +50,7 @@ class UVMonitorScreen extends StatefulWidget {
 
 class _UVMonitorScreenState extends State<UVMonitorScreen> {
   final TextEditingController _ipController =
-      TextEditingController(text: '192.168.1.100');
+      TextEditingController(text: '192.168.0.117');
 
   Timer? _pollTimer;
   bool _isLiveHardware = false;
@@ -94,7 +94,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     try {
       final response = await http
           .get(Uri.parse('http://$ip/data'))
-          .timeout(const Duration(seconds: 2));
+          .timeout(const Duration(seconds: 3));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -104,10 +104,10 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
         _addReading(mv, uv, rssi, isLive: true);
       } else {
-        setState(() => _status = 'ESP32 HTTP Error ${response.statusCode}');
+        setState(() => _status = 'HTTP Error ${response.statusCode}');
       }
     } catch (e) {
-      setState(() => _status = 'Cannot reach $ip — Check Wi-Fi');
+      setState(() => _status = 'Error: Check if phone & ESP32 share same Wi-Fi');
     }
   }
 
@@ -119,7 +119,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       _latestRssi = rssi;
       _packetCount++;
       if (isLive) {
-        _status = 'Connected to ESP32 (Packets: $_packetCount)';
+        _status = 'Live ESP32 Connected! (Packets: $_packetCount)';
       }
 
       _records.add(UVRecord(
@@ -216,7 +216,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // IP Input Bar
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
@@ -380,6 +379,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
   Widget _metricCard(String title, String value, Color color) {
     return Container(
+      path: const EdgeInsets.all(14), // fixed syntax
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: const Color(0xFF1E293B),
