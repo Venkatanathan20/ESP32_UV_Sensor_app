@@ -3,12 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
@@ -75,12 +75,12 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   final TextEditingController _ipController =
       TextEditingController(text: '192.168.0.117');
 
-  // Polling & Hardware State
+  // Polling & Hardware State (Default 10s gap, switchable to 5s)
   Timer? _pollTimer;
   bool _isLiveHardware = false;
   bool _isSimulating = false;
   String _status = 'Enter ESP32 IP & tap Connect (10s Interval)';
-  int _selectedPollSeconds = 10; // Default 10s interval (adjustable 5s or 10s)
+  int _selectedPollSeconds = 10;
 
   // Live Telemetry Metrics
   double _latestMv = 0.0;
@@ -89,21 +89,18 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   int _latestRssi = 0;
   int _packetCount = 0;
 
-  // Threshold & Notification State
-  double _uvAlertThreshold = 3.0; // UV >= 3.0 triggers High Alert
+  // Threshold & Alert State
+  double _uvAlertThreshold = 3.0;
   bool _wasHighUvState = false;
-  final FlutterLocalNotificationsPlugin _notificationsPlugin =
-      FlutterLocalNotificationsPlugin();
 
   // Historical Data & Filtering (Day, Week, Month, Year)
   final List<UVRecord> _liveRecords = [];
   List<UVRecord> _allHistoryRecords = [];
-  String _selectedTimeFilter = 'Day'; // 'Day', 'Week', 'Month', 'Year'
+  String _selectedTimeFilter = 'Day';
 
   @override
   void initState() {
     super.initState();
-    _initNotifications();
     _loadSavedHistory();
   }
 
@@ -114,40 +111,62 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     super.dispose();
   }
 
-  // ================= 1. NOTIFICATIONS SETUP =================
-  Future<void> _initNotifications() async {
-    const androidSettings =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-    const initSettings = InitializationSettings(android: androidSettings);
-    await _notificationsPlugin.initialize(initSettings);
-
-    final androidImplementation =
-        _notificationsPlugin.resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
-    await androidImplementation?.requestNotificationsPermission();
-  }
-
-  Future<void> _sendUvNotification({
+  // ================= 1. NATIVE ALERT & HAPTIC NOTIFICATION =================
+  void _triggerAlertNotification({
     required String title,
     required String body,
     required bool isHighAlert,
-  }) async {
-    final androidDetails = AndroidNotificationDetails(
-      isHighAlert ? 'uv_high_channel' : 'uv_safe_channel',
-      isHighAlert ? 'High UV Alerts' : 'Safe UV Status',
-      channelDescription: 'Notifications for UV safety thresholds',
-      importance: Importance.max,
-      priority: Priority.high,
-      color: isHighAlert ? const Color(0xFFFF0055) : const Color(0xFF00F5D4),
-      enableVibration: true,
-    );
+  }) {
+    // Trigger physical vibration & system alert sound
+    HapticFeedback.heavyImpact();
+    SystemSound.play(SystemSoundType.alert);
 
-    final details = NotificationDetails(android: androidDetails);
-    await _notificationsPlugin.show(
-      isHighAlert ? 101 : 102,
-      title,
-      body,
-      details,
+    if (!mounted) return;
+
+    // Show prominent top-styled floating notification banner
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+        duration: const Duration(seconds: 5),
+        backgroundColor:
+            isHighAlert ? const Color(0xFFFF0055) : const Color(0xFF00B4D8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        content: Row(
+          children: [
+            Icon(
+              isHighAlert
+                  ? Icons.warning_amber_rounded
+                  : Icons.check_circle_rounded,
+              color: Colors.white,
+              size: 28,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    body,
+                    style: const TextStyle(color: Colors.white, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -167,7 +186,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
   Future<void> _saveRecordToHistory(UVRecord record) async {
     _allHistoryRecords.add(record);
-    // Keep up to 5,000 logs locally for Day/Week/Month/Year analysis
     if (_allHistoryRecords.length > 5000) {
       _allHistoryRecords.removeAt(0);
     }
@@ -190,7 +208,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     _peakUvToday = maxUv;
   }
 
-  // ================= 3. HARDWARE POLLING (10s GAP) =================
+  // ================= 3. HARDWARE POLLING (5s-10s GAP) =================
   void _toggleHardwareConnection() {
     _pollTimer?.cancel();
     setState(() {
@@ -203,7 +221,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       setState(() => _status =
           'Connecting to http://$ip/data (${_selectedPollSeconds}s gap)...');
       _fetchHardwareReading();
-      // Poll every 10 seconds (or 5s if toggled) as requested
       _pollTimer = Timer.periodic(
         Duration(seconds: _selectedPollSeconds),
         (_) => _fetchHardwareReading(),
@@ -236,7 +253,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       if (mounted && _liveRecords.isEmpty) {
         setState(() => _status = 'Connection Failed: Check IP / Wi-Fi');
       } else if (mounted) {
-        setState(() => _status = 'Packet dropped, retrying in ${_selectedPollSeconds}s...');
+        setState(() =>
+            _status = 'Packet dropped, retrying in ${_selectedPollSeconds}s...');
       }
     }
   }
@@ -254,37 +272,18 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     // Check UV Alert State Transitions (High vs Safe)
     if (uv >= _uvAlertThreshold && !_wasHighUvState) {
       _wasHighUvState = true;
-      _sendUvNotification(
+      _triggerAlertNotification(
         title: '⚠️ HIGH UV ALERT! (${uv.toStringAsFixed(2)} mW/cm²)',
         body:
-            'UV levels have exceeded your safe threshold (${_uvAlertThreshold.toStringAsFixed(1)}). Seek shade or apply SPF protection!',
+            'UV exceeded safe limit (${_uvAlertThreshold.toStringAsFixed(1)}). Seek shade or apply SPF!',
         isHighAlert: true,
       );
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: const Color(0xFFFF0055),
-          content: Text(
-            '⚠️ High UV Alert! Reading: ${uv.toStringAsFixed(2)} mW/cm²',
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-          ),
-        ),
-      );
-    } else if (uv < (_uvAlertThreshold - 0.3) && _wasHighUvState) {
-      // Hysteresis buffer of 0.3 so it doesn't spam notifications on borderline values
+    } else if (uv < (_uvAlertThreshold - 0.2) && _wasHighUvState) {
       _wasHighUvState = false;
-      _sendUvNotification(
-        title: '✅ UV Level Normal & Safe (${uv.toStringAsFixed(2)} mW/cm²)',
-        body: 'UV intensity has dropped back to safe levels. It is safe outside!',
+      _triggerAlertNotification(
+        title: '✅ UV NORMAL & SAFE (${uv.toStringAsFixed(2)} mW/cm²)',
+        body: 'UV intensity dropped back to safe levels. Safe outdoors!',
         isHighAlert: false,
-      );
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: const Color(0xFF00BBF9),
-          content: Text(
-            '✅ UV Normal & Safe! Reading: ${uv.toStringAsFixed(2)} mW/cm²',
-            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-          ),
-        ),
       );
     }
 
@@ -316,7 +315,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       _isSimulating = !_isSimulating;
       if (_isSimulating) {
         _status = 'Demo Stream Active (Every ${_selectedPollSeconds}s)';
-        // Generate an immediate reading then follow the 5-10s interval
         _generateDemoPoint();
         _pollTimer = Timer.periodic(
           Duration(seconds: _selectedPollSeconds),
@@ -330,9 +328,10 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
   void _generateDemoPoint() {
     final rng = Random();
-    // Simulate occasional high spikes above 3.0 to test Alert & Table
     final bool spike = rng.nextInt(3) == 0;
-    final mv = spike ? (320.0 + rng.nextDouble() * 450.0) : (40.0 + rng.nextDouble() * 180.0);
+    final mv = spike
+        ? (320.0 + rng.nextDouble() * 450.0)
+        : (40.0 + rng.nextDouble() * 180.0);
     final uv = mv / 100.0;
     _addReading(mv, uv, -52, isLive: false);
   }
@@ -341,7 +340,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   List<UVRecord> _getFilteredHighUvLogs() {
     final now = DateTime.now();
     return _allHistoryRecords.where((r) {
-      // Only show readings where UV was High (>= threshold)
       if (r.uvIndex < _uvAlertThreshold) return false;
 
       switch (_selectedTimeFilter) {
@@ -359,36 +357,39 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           return true;
       }
     }).toList()
-      ..sort((a, b) => b.timestamp.compareTo(a.timestamp)); // Newest first
+      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
   }
 
   // ================= 5. DYNAMIC VIBRANT THEME HELPERS =================
   Map<String, dynamic> _getUvSeverityMeta(double uv) {
+    // Estimate safe exposure minutes before sunburn
+    int safeMins = uv <= 0.1 ? 300 : (200 / (uv * 1.5)).clamp(5, 300).toInt();
+
     if (uv < 2.0) {
       return {
-        'label': 'LOW • SAFE',
-        'advice': 'No protection needed. Safe to be outdoors!',
+        'label': 'LOW • SAFE LEVEL',
+        'advice': 'Safe outdoors! Est. safe exposure: >$safeMins mins.',
         'color': const Color(0xFF00F5D4),
         'gradient': [const Color(0xFF00F5D4), const Color(0xFF00BBF9)],
       };
     } else if (uv < 5.0) {
       return {
         'label': 'MODERATE • CAUTION',
-        'advice': 'Wear sunglasses & apply SPF 30+ sunscreen.',
+        'advice': 'Apply SPF 30+. Safe unprotected time: ~$safeMins mins.',
         'color': const Color(0xFFFEE440),
         'gradient': [const Color(0xFFFEE440), const Color(0xFFF15BB5)],
       };
     } else if (uv < 8.0) {
       return {
-        'label': 'HIGH • SEEK SHADE',
-        'advice': 'Reduce midday sun exposure. Hat & SPF required!',
+        'label': 'HIGH UV • SEEK SHADE',
+        'advice': 'High UV alert! Unprotected burn risk in ~$safeMins mins.',
         'color': const Color(0xFFFF9E00),
         'gradient': [const Color(0xFFFF9E00), const Color(0xFFFF0055)],
       };
     } else {
       return {
-        'label': 'EXTREME • DANGER',
-        'advice': 'Avoid direct sun! High risk of rapid skin burn.',
+        'label': 'EXTREME UV • DANGER',
+        'advice': 'Avoid direct sun! Burn risk in under $safeMins mins!',
         'color': const Color(0xFFFF0055),
         'gradient': [const Color(0xFFFF0055), const Color(0xFF7B2CBF)],
       };
@@ -456,7 +457,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           ],
         ),
         actions: [
-          // Toggle between 5s and 10s interval
           PopupMenuButton<int>(
             tooltip: 'Sampling Interval',
             icon: const Icon(Icons.timer_outlined, color: Color(0xFF00F5D4)),
@@ -479,11 +479,14 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
             onPressed: _toggleDemoStream,
             icon: Icon(
               _isSimulating ? Icons.stop_circle : Icons.auto_graph_rounded,
-              color: _isSimulating ? const Color(0xFFFF0055) : const Color(0xFF00F5D4),
+              color: _isSimulating
+                  ? const Color(0xFFFF0055)
+                  : const Color(0xFF00F5D4),
             ),
             label: Text(
               _isSimulating ? 'Stop' : 'Demo',
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.bold),
             ),
           ),
         ],
@@ -510,10 +513,12 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                           child: TextField(
                             controller: _ipController,
                             style: const TextStyle(
-                                color: Colors.white, fontWeight: FontWeight.bold),
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold),
                             decoration: InputDecoration(
                               labelText: 'ESP32 Local IP (from OLED)',
-                              labelStyle: const TextStyle(color: Colors.white60),
+                              labelStyle:
+                                  const TextStyle(color: Colors.white60),
                               prefixIcon: const Icon(Icons.router_rounded,
                                   color: Color(0xFF00F5D4)),
                               filled: true,
@@ -578,7 +583,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                           ),
                         ),
                         Text(
-                          'Interval: ${_selectedPollSeconds}s | $_latestRssi dBm',
+                          'Gap: ${_selectedPollSeconds}s | $_latestRssi dBm',
                           style: const TextStyle(
                               color: Colors.white54,
                               fontSize: 11,
@@ -605,7 +610,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                     end: Alignment.bottomRight,
                   ),
                   borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: activeColor.withOpacity(0.6), width: 1.5),
+                  border:
+                      Border.all(color: activeColor.withOpacity(0.6), width: 1.5),
                 ),
                 child: Row(
                   children: [
@@ -688,7 +694,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
               // 4. CUSTOM ALERT THRESHOLD SLIDER
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 decoration: BoxDecoration(
                   color: const Color(0xFF151F32),
                   borderRadius: BorderRadius.circular(14),
@@ -699,8 +706,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                         color: Color(0xFFFEE440), size: 20),
                     const SizedBox(width: 10),
                     const Text(
-                      'High UV Alert Threshold:',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                      'High UV Alert Limit:',
+                      style:
+                          TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                     ),
                     Expanded(
                       child: Slider(
@@ -861,8 +869,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                       SizedBox(width: 6),
                       Text(
                         'High UV Peak Exposure Log',
-                        style:
-                            TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                        style: TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w800),
                       ),
                     ],
                   ),
