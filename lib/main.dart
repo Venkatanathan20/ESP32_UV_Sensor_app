@@ -5,9 +5,9 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 void main() => runApp(const UVMonitorApp());
 
@@ -49,16 +49,13 @@ class UVMonitorScreen extends StatefulWidget {
 }
 
 class _UVMonitorScreenState extends State<UVMonitorScreen> {
-  // Use HiveMQ WebSocket Port 8000 (Non-TLS, bypasses Android certificate handshake errors)
-  static const String wsUrl = 'ws://broker.hivemq.com:8000/mqtt';
-  static const String mqttTopic = 'venkat_iot/sensors/uv/node_01';
+  final TextEditingController _ipController =
+      TextEditingController(text: '192.168.1.100');
 
-  WebSocketChannel? _channel;
-  StreamSubscription? _sub;
-  String _status = 'Connecting to HiveMQ (Port 8000)...';
-  bool _isConnected = false;
+  Timer? _pollTimer;
+  bool _isLiveHardware = false;
   bool _isSimulating = false;
-  Timer? _simTimer;
+  String _status = 'Enter ESP32 IP from OLED & tap Connect';
 
   double _latestMv = 0.0;
   double _latestUv = 0.0;
@@ -67,87 +64,50 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   final List<UVRecord> _records = [];
 
   @override
-  void initState() {
-    super.initState();
-    _connectWebSocket();
-  }
-
-  @override
   void dispose() {
-    _simTimer?.cancel();
-    _sub?.cancel();
-    _channel?.sink.close();
+    _pollTimer?.cancel();
+    _ipController.dispose();
     super.dispose();
   }
 
-  void _connectWebSocket() {
-    _sub?.cancel();
-    _channel?.sink.close();
+  void _toggleHardwareConnection() {
+    _pollTimer?.cancel();
+    setState(() {
+      _isSimulating = false;
+      _isLiveHardware = !_isLiveHardware;
+    });
 
-    try {
-      setState(() => _status = 'Connecting to Port 8000...');
-      
-      _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
-
-      _sub = _channel!.stream.listen(
-        (message) {
-          if (!mounted) return;
-          try {
-            String rawStr = message.toString();
-            int jsonStart = rawStr.indexOf('{');
-            if (jsonStart != -1) {
-              String jsonString = rawStr.substring(jsonStart);
-              final Map<String, dynamic> data = jsonDecode(jsonString);
-
-              double mv = 0.0;
-              if (data['sensor_mv'] != null) {
-                mv = double.tryParse(data['sensor_mv'].toString()) ?? 0.0;
-              } else if (data['voltage_v'] != null) {
-                mv = (double.tryParse(data['voltage_v'].toString()) ?? 0.0) * 1000.0;
-              }
-
-              double uv = double.tryParse(
-                      (data['uv_intensity_mw_cm2'] ?? data['uv_index'] ?? '0')
-                          .toString()) ??
-                  (mv / 100.0);
-
-              int rssi = int.tryParse((data['rssi_dbm'] ?? '0').toString()) ?? 0;
-
-              _addReading(mv, uv, rssi, isLive: true);
-            }
-          } catch (_) {}
-        },
-        onError: (error) {
-          if (mounted && !_isSimulating) {
-            setState(() {
-              _isConnected = false;
-              _status = 'Connection Error: Check Network';
-            });
-          }
-        },
-        onDone: () {
-          if (mounted && !_isSimulating) {
-            setState(() {
-              _isConnected = false;
-              _status = 'Disconnected: Tap Refresh';
-            });
-          }
-        },
-      );
-
-      // Send MQTT CONNECT packet frame over WebSocket after connecting
-      // Subscribing to topic via raw WS buffer frame
-      setState(() {
-        _isConnected = true;
-        _status = 'Connected! Listening for ESP32...';
+    if (_isLiveHardware) {
+      final ip = _ipController.text.trim();
+      setState(() => _status = 'Polling ESP32 at http://$ip/data ...');
+      _fetchHardwareReading();
+      _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        _fetchHardwareReading();
       });
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isConnected = false;
-          _status = 'Failed: $e';
-        });
+    } else {
+      setState(() => _status = 'Polling Stopped');
+    }
+  }
+
+  Future<void> _fetchHardwareReading() async {
+    final ip = _ipController.text.trim();
+    try {
+      final response = await http
+          .get(Uri.parse('http://$ip/data'))
+          .timeout(const Duration(seconds: 2));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        double mv = double.tryParse(data['sensor_mv'].toString()) ?? 0.0;
+        double uv = double.tryParse(data['uv_index'].toString()) ?? (mv / 100.0);
+        int rssi = int.tryParse(data['rssi_dbm'].toString()) ?? 0;
+
+        _addReading(mv, uv, rssi, isLive: true);
+      } else {
+        setState(() => _status = 'ESP32 HTTP Error ${response.statusCode}');
       }
+    } catch (e) {
+      setState(() => _status = 'Cannot reach $ip — Check Wi-Fi');
     }
   }
 
@@ -159,7 +119,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       _latestRssi = rssi;
       _packetCount++;
       if (isLive) {
-        _status = 'Live ESP32 Active (Packets: $_packetCount)';
+        _status = 'Connected to ESP32 (Packets: $_packetCount)';
       }
 
       _records.add(UVRecord(
@@ -176,19 +136,20 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   }
 
   void _toggleDemoStream() {
+    _pollTimer?.cancel();
     setState(() {
+      _isLiveHardware = false;
       _isSimulating = !_isSimulating;
       if (_isSimulating) {
         _status = 'Demo Stream Active (Every 2s)';
-        _simTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
           final rng = Random();
           final mv = 12.5 + rng.nextDouble() * 7.0;
           final uv = mv / 100.0;
-          _addReading(mv, uv, -51, isLive: false);
+          _addReading(mv, uv, -50, isLive: false);
         });
       } else {
-        _simTimer?.cancel();
-        _status = _isConnected ? 'Connected! Listening for ESP32...' : 'Demo Stopped';
+        _status = 'Demo Stopped';
       }
     });
   }
@@ -196,7 +157,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   Future<void> _exportCsvAndroid() async {
     if (_records.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No data yet! Wait for ESP32 packet or tap Demo.')),
+        const SnackBar(content: Text('No data yet! Connect ESP32 or tap Demo.')),
       );
       return;
     }
@@ -247,10 +208,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               style: const TextStyle(color: Colors.white),
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.tealAccent),
-            onPressed: _connectWebSocket,
-          ),
         ],
       ),
       body: SafeArea(
@@ -259,16 +216,49 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // IP Input Bar
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E293B),
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color: (_isConnected || _isSimulating)
-                        ? Colors.tealAccent
-                        : Colors.orangeAccent,
-                  ),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _ipController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'ESP32 IP Address (from OLED)',
+                          labelStyle: TextStyle(color: Colors.white70),
+                          prefixIcon: Icon(Icons.wifi, color: Colors.tealAccent),
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _isLiveHardware ? Colors.redAccent : Colors.teal,
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                      ),
+                      onPressed: _toggleHardwareConnection,
+                      child: Text(
+                        _isLiveHardware ? 'Disconnect' : 'Connect',
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E293B),
+                  borderRadius: BorderRadius.circular(10),
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -277,18 +267,13 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                       child: Text(
                         _status,
                         style: TextStyle(
-                          color: (_isConnected || _isSimulating)
-                              ? Colors.greenAccent
-                              : Colors.orangeAccent,
+                          color: (_isLiveHardware || _isSimulating) ? Colors.greenAccent : Colors.orangeAccent,
                           fontWeight: FontWeight.bold,
                           fontSize: 12,
                         ),
                       ),
                     ),
-                    Text(
-                      '$_latestRssi dBm',
-                      style: const TextStyle(color: Colors.white70, fontSize: 12),
-                    ),
+                    Text('$_latestRssi dBm', style: const TextStyle(color: Colors.white70, fontSize: 12)),
                   ],
                 ),
               ),
@@ -296,19 +281,11 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               Row(
                 children: [
                   Expanded(
-                    child: _metricCard(
-                      'mV / mW Output',
-                      '${_latestMv.toStringAsFixed(2)} mV',
-                      Colors.cyanAccent,
-                    ),
+                    child: _metricCard('mV / Output', '${_latestMv.toStringAsFixed(2)} mV', Colors.cyanAccent),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: _metricCard(
-                      'UV Index',
-                      '${_latestUv.toStringAsFixed(3)} mW/cm²',
-                      Colors.amberAccent,
-                    ),
+                    child: _metricCard('UV Index', '${_latestUv.toStringAsFixed(3)} mW/cm²', Colors.amberAccent),
                   ),
                 ],
               ),
@@ -316,14 +293,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text(
-                    'Live Timestamped UV Graph',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                  ),
-                  Text(
-                    'Rows: ${_records.length}',
-                    style: const TextStyle(color: Colors.white60, fontSize: 12),
-                  ),
+                  const Text('Live Timestamped UV Graph', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                  Text('Rows: ${_records.length}', style: const TextStyle(color: Colors.white60, fontSize: 12)),
                 ],
               ),
               const SizedBox(height: 8),
@@ -337,7 +308,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                   child: _records.isEmpty
                       ? const Center(
                           child: Text(
-                            'Listening on Port 8000 WebSocket\nTopic: venkat_iot/sensors/uv/node_01\n\n(Or tap "Demo" at top right to test)',
+                            'Enter ESP32 IP Address above & tap Connect,\n- OR - Tap "Demo" at top right to test graph & CSV!',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: Colors.white54),
                           ),
@@ -372,11 +343,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                             ),
                             lineBarsData: [
                               LineChartBarData(
-                                spots: _records
-                                    .asMap()
-                                    .entries
-                                    .map((e) => FlSpot(e.key.toDouble(), e.value.uvIndex))
-                                    .toList(),
+                                spots: _records.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value.uvIndex)).toList(),
                                 isCurved: true,
                                 color: Colors.amberAccent,
                                 barWidth: 3,
@@ -394,19 +361,13 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.teal,
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
                   onPressed: _exportCsvAndroid,
                   icon: const Icon(Icons.download, color: Colors.white),
                   label: const Text(
                     'Export 3-Column CSV (Timestamp, mV/mW, UV_Index)',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white),
                   ),
                 ),
               ),
@@ -429,10 +390,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
         children: [
           Text(title, style: const TextStyle(color: Colors.white60, fontSize: 11)),
           const SizedBox(height: 4),
-          Text(
-            value,
-            style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold),
-          ),
+          Text(value, style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold)),
         ],
       ),
     );
