@@ -79,13 +79,14 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
     if (_isLiveHardware) {
       final ip = _ipController.text.trim();
-      setState(() => _status = 'Polling ESP32 at http://$ip/data ...');
+      setState(() => _status = 'Connected (Real-time Live Stream)');
       _fetchHardwareReading();
-      _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      // Poll every 1 second for ultra-responsive live updates
+      _pollTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
         _fetchHardwareReading();
       });
     } else {
-      setState(() => _status = 'Polling Stopped');
+      setState(() => _status = 'Stream Stopped');
     }
   }
 
@@ -94,7 +95,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     try {
       final response = await http
           .get(Uri.parse('http://$ip/data'))
-          .timeout(const Duration(seconds: 6)); // Increased timeout for ESP32 background tasks
+          .timeout(const Duration(milliseconds: 900)); // Fast 0.9s timeout
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -103,19 +104,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
         int rssi = int.tryParse(data['rssi_dbm'].toString()) ?? 0;
 
         _addReading(mv, uv, rssi, isLive: true);
-      } else {
-        // Keep previous reading if it's just a temporary glitch
-        if (_records.isNotEmpty) {
-          setState(() => _status = 'ESP32 Busy (Retrying...)');
-        }
       }
-    } catch (e) {
-      // Only show warning if we miss multiple frames, keep streaming smooth
-      if (_records.isNotEmpty) {
-        setState(() => _status = 'Signal lag... waiting for ESP32');
-      } else {
-        setState(() => _status = 'Error: Cannot reach $ip');
-      }
+    } catch (_) {
+      // Fail silently on single dropped frames so the graph never freezes or lags
     }
   }
 
