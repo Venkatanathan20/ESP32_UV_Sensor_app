@@ -49,7 +49,6 @@ class UVMonitorScreen extends StatefulWidget {
 }
 
 class _UVMonitorScreenState extends State<UVMonitorScreen> {
-  // Direct Secure WebSocket URL for HiveMQ (Port 8884)
   static const String wsUrl = 'wss://broker.hivemq.com:8884/mqtt';
   static const String mqttTopic = 'venkat_iot/sensors/uv/node_01';
 
@@ -87,18 +86,13 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     try {
       setState(() => _status = 'Connecting to WSS Port 8884...');
       
-      // Initialize WebSocket connection to HiveMQ
       _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
 
       _sub = _channel!.stream.listen(
         (message) {
           if (!mounted) return;
-          
-          // HiveMQ MQTT over WebSocket sends binary/string frames.
-          // If it's a PUBLISH packet containing our JSON payload:
           try {
             String rawStr = message.toString();
-            // Look for JSON payload inside the message stream
             int jsonStart = rawStr.indexOf('{');
             if (jsonStart != -1) {
               String jsonString = rawStr.substring(jsonStart);
@@ -185,7 +179,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
         _status = 'Demo Stream Active (Every 2s)';
         _simTimer = Timer.periodic(const Duration(seconds: 2), (_) {
           final rng = Random();
-          final mv = 12.5 + rng.nextDouble * 7.0;
+          final mv = 12.5 + rng.nextDouble() * 7.0;
           final uv = mv / 100.0;
           _addReading(mv, uv, -51, isLive: false);
         });
