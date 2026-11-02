@@ -6,11 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_browser_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 
 void main() => runApp(const UVMonitorApp());
 
@@ -52,12 +50,11 @@ class UVMonitorScreen extends StatefulWidget {
 }
 
 class _UVMonitorScreenState extends State<UVMonitorScreen> {
-  // Use Secure WebSocket Port 8884 (Bypasses mobile carrier port 1883 blocks!)
-  static const String wsBroker = 'wss://broker.hivemq.com:8884/mqtt';
+  static const String mqttBroker = 'broker.hivemq.com';
   static const int wsPort = 8884;
   static const String mqttTopic = 'venkat_iot/sensors/uv/node_01';
 
-  MqttClient? _client;
+  MqttServerClient? _client;
   String _status = 'Connecting to Secure HiveMQ (Port 8884)...';
   bool _isConnected = false;
   bool _isSimulating = false;
@@ -83,24 +80,15 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   }
 
   Future<void> _connectSecureWebSocket() async {
-    final clientId = 'uv_client_${Random().nextInt(999999)}';
+    final clientId = 'uv_android_${Random().nextInt(999999)}';
 
     _client?.disconnect();
-
-    if (kIsWeb) {
-      final browserClient = MqttBrowserClient.withPort(wsBroker, clientId, wsPort);
-      browserClient.websocketProtocols = MqttClientConstants.protocolsSingleDefault;
-      _client = browserClient;
-    } else {
-      final serverClient = MqttServerClient.withPort('broker.hivemq.com', clientId, wsPort);
-      serverClient.useWebSocket = true;
-      serverClient.secure = true;
-      serverClient.websocketProtocols = MqttClientConstants.protocolsSingleDefault;
-      _client = serverClient;
-    }
-
+    _client = MqttServerClient.withPort(mqttBroker, clientId, wsPort);
+    _client!.useWebSocket = true;
+    _client!.secure = true;
     _client!.keepAlivePeriod = 20;
     _client!.autoReconnect = true;
+    _client!.websocketProtocols = MqttClientConstants.protocolsSingleDefault;
 
     _client!.onDisconnected = () {
       if (mounted && !_isSimulating) {
@@ -232,31 +220,21 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       );
     }
 
-    if (kIsWeb) {
-      final bytes = utf8.encode(csv.toString());
-      final blob = html.Blob([bytes], 'text/csv');
-      final url = html.Url.createObjectUrlFromBlob(blob);
-      html.AnchorElement(href: url)
-        ..setAttribute('download', 'uv_log_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv')
-        ..click();
-      html.Url.revokeObjectUrl(url);
-    } else {
-      try {
-        final directory = await getTemporaryDirectory();
-        final fileName = 'uv_telemetry_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv';
-        final file = File('${directory.path}/$fileName');
-        await file.writeAsString(csv.toString());
+    try {
+      final directory = await getTemporaryDirectory();
+      final fileName = 'uv_telemetry_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv';
+      final file = File('${directory.path}/$fileName');
+      await file.writeAsString(csv.toString());
 
-        await Share.shareXFiles(
-          [XFile(file.path)],
-          text: 'ESP32-C3 UV Sensor 3-Column CSV Log',
-        );
-      } catch (e) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('CSV Export Error: $e')),
-        );
-      }
+      await Share.shareXFiles(
+        [XFile(file.path)],
+        text: 'ESP32-C3 UV Sensor 3-Column CSV Log',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('CSV Export Error: $e')),
+      );
     }
   }
 
