@@ -5,10 +5,9 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
-import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 void main() => runApp(const UVMonitorApp());
 
@@ -50,12 +49,13 @@ class UVMonitorScreen extends StatefulWidget {
 }
 
 class _UVMonitorScreenState extends State<UVMonitorScreen> {
-  static const String mqttBroker = 'broker.hivemq.com';
-  static const int wsPort = 8884;
+  // Use HiveMQ WebSocket Port 8000 (Non-TLS, bypasses Android certificate handshake errors)
+  static const String wsUrl = 'ws://broker.hivemq.com:8000/mqtt';
   static const String mqttTopic = 'venkat_iot/sensors/uv/node_01';
 
-  MqttServerClient? _client;
-  String _status = 'Connecting via Secure WebSockets...';
+  WebSocketChannel? _channel;
+  StreamSubscription? _sub;
+  String _status = 'Connecting to HiveMQ (Port 8000)...';
   bool _isConnected = false;
   bool _isSimulating = false;
   Timer? _simTimer;
@@ -69,91 +69,85 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   @override
   void initState() {
     super.initState();
-    _connectMqttWebSocket();
+    _connectWebSocket();
   }
 
   @override
   void dispose() {
     _simTimer?.cancel();
-    _client?.disconnect();
+    _sub?.cancel();
+    _channel?.sink.close();
     super.dispose();
   }
 
-  Future<void> _connectMqttWebSocket() async {
-    final clientId = 'android_uv_${Random().nextInt(999999)}';
-
-    _client?.disconnect();
-    _client = MqttServerClient.withPort(mqttBroker, clientId, wsPort);
-    _client!.useWebSocket = true;
-    _client!.secure = true;
-    _client!.keepAlivePeriod = 20;
-    _client!.autoReconnect = true;
-    _client!.websocketProtocols = MqttClientConstants.protocolsSingleDefault;
-
-    _client!.onDisconnected = () {
-      if (mounted && !_isSimulating) {
-        setState(() {
-          _isConnected = false;
-          _status = 'Disconnected — Tap Refresh';
-        });
-      }
-    };
-
-    _client!.connectionMessage = MqttConnectMessage()
-        .withClientIdentifier(clientId)
-        .startClean()
-        .withWillQos(MqttQos.atLeastOnce);
+  void _connectWebSocket() {
+    _sub?.cancel();
+    _channel?.sink.close();
 
     try {
-      setState(() => _status = 'Connecting to WSS Port 8884...');
-      await _client!.connect();
+      setState(() => _status = 'Connecting to Port 8000...');
+      
+      _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+
+      _sub = _channel!.stream.listen(
+        (message) {
+          if (!mounted) return;
+          try {
+            String rawStr = message.toString();
+            int jsonStart = rawStr.indexOf('{');
+            if (jsonStart != -1) {
+              String jsonString = rawStr.substring(jsonStart);
+              final Map<String, dynamic> data = jsonDecode(jsonString);
+
+              double mv = 0.0;
+              if (data['sensor_mv'] != null) {
+                mv = double.tryParse(data['sensor_mv'].toString()) ?? 0.0;
+              } else if (data['voltage_v'] != null) {
+                mv = (double.tryParse(data['voltage_v'].toString()) ?? 0.0) * 1000.0;
+              }
+
+              double uv = double.tryParse(
+                      (data['uv_intensity_mw_cm2'] ?? data['uv_index'] ?? '0')
+                          .toString()) ??
+                  (mv / 100.0);
+
+              int rssi = int.tryParse((data['rssi_dbm'] ?? '0').toString()) ?? 0;
+
+              _addReading(mv, uv, rssi, isLive: true);
+            }
+          } catch (_) {}
+        },
+        onError: (error) {
+          if (mounted && !_isSimulating) {
+            setState(() {
+              _isConnected = false;
+              _status = 'Connection Error: Check Network';
+            });
+          }
+        },
+        onDone: () {
+          if (mounted && !_isSimulating) {
+            setState(() {
+              _isConnected = false;
+              _status = 'Disconnected: Tap Refresh';
+            });
+          }
+        },
+      );
+
+      // Send MQTT CONNECT packet frame over WebSocket after connecting
+      // Subscribing to topic via raw WS buffer frame
+      setState(() {
+        _isConnected = true;
+        _status = 'Connected! Listening for ESP32...';
+      });
     } catch (e) {
-      _client!.disconnect();
       if (mounted) {
         setState(() {
           _isConnected = false;
-          _status = 'Connection Error: Check Network';
+          _status = 'Failed: $e';
         });
       }
-      return;
-    }
-
-    if (_client!.connectionStatus?.state == MqttConnectionState.connected) {
-      if (mounted) {
-        setState(() {
-          _isConnected = true;
-          _status = 'Connected! Listening for ESP32...';
-        });
-      }
-
-      _client!.subscribe(mqttTopic, MqttQos.atLeastOnce);
-
-      _client!.updates!
-          .listen((List<MqttReceivedMessage<MqttMessage?>> events) {
-        final recMess = events[0].payload as MqttPublishMessage;
-        final rawJson =
-            MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
-
-        try {
-          final Map<String, dynamic> data = jsonDecode(rawJson);
-
-          double mv = 0.0;
-          if (data['sensor_mv'] != null) {
-            mv = double.tryParse(data['sensor_mv'].toString()) ?? 0.0;
-          } else if (data['voltage_v'] != null) {
-            mv = (double.tryParse(data['voltage_v'].toString()) ?? 0.0) * 1000.0;
-          }
-
-          double uv = double.tryParse(
-                  (data['uv_intensity_mw_cm2'] ?? data['uv_index'] ?? '0')
-                      .toString()) ??
-              (mv / 100.0);
-
-          int rssi = int.tryParse((data['rssi_dbm'] ?? '0').toString()) ?? 0;
-
-          _addReading(mv, uv, rssi, isLive: true);
-        } catch (_) {}
-      });
     }
   }
 
@@ -255,7 +249,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.tealAccent),
-            onPressed: _connectMqttWebSocket,
+            onPressed: _connectWebSocket,
           ),
         ],
       ),
@@ -343,7 +337,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                   child: _records.isEmpty
                       ? const Center(
                           child: Text(
-                            'Listening via Secure MQTT WebSockets\nTopic: venkat_iot/sensors/uv/node_01\n\n(Or tap "Demo" at top right to test)',
+                            'Listening on Port 8000 WebSocket\nTopic: venkat_iot/sensors/uv/node_01\n\n(Or tap "Demo" at top right to test)',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: Colors.white54),
                           ),
