@@ -6,24 +6,26 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'package:mqtt_client/mqtt_client.dart';
+import 'package:mqtt_client/mqtt_browser_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
-void main() => runApp(const UVAndroidApp());
+void main() => runApp(const UVMonitorApp());
 
-class UVAndroidApp extends StatelessWidget {
-  const UVAndroidApp({super.key});
+class UVMonitorApp extends StatelessWidget {
+  const UVMonitorApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'ESP32-C3 UV Monitor (APK)',
+      title: 'ESP32-C3 UV Monitor',
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0F172A),
       ),
-      home: const UVAndroidHomeScreen(),
+      home: const UVMonitorScreen(),
     );
   }
 }
@@ -42,21 +44,21 @@ class UVRecord {
   });
 }
 
-class UVAndroidHomeScreen extends StatefulWidget {
-  const UVAndroidHomeScreen({super.key});
+class UVMonitorScreen extends StatefulWidget {
+  const UVMonitorScreen({super.key});
 
   @override
-  State<UVAndroidHomeScreen> createState() => _UVAndroidHomeScreenState();
+  State<UVMonitorScreen> createState() => _UVMonitorScreenState();
 }
 
-class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
-  // Exact same TCP Broker, Port 1883, and Topic as your ESP32-C3!
-  static const String mqttBroker = 'broker.hivemq.com';
-  static const int mqttPort = 1883;
+class _UVMonitorScreenState extends State<UVMonitorScreen> {
+  // Use Secure WebSocket Port 8884 (Bypasses mobile carrier port 1883 blocks!)
+  static const String wsBroker = 'wss://broker.hivemq.com:8884/mqtt';
+  static const int wsPort = 8884;
   static const String mqttTopic = 'venkat_iot/sensors/uv/node_01';
 
-  MqttServerClient? _client;
-  String _status = 'Connecting to HiveMQ TCP Port 1883...';
+  MqttClient? _client;
+  String _status = 'Connecting to Secure HiveMQ (Port 8884)...';
   bool _isConnected = false;
   bool _isSimulating = false;
   Timer? _simTimer;
@@ -70,7 +72,7 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
   @override
   void initState() {
     super.initState();
-    _connectMqttTcp1883();
+    _connectSecureWebSocket();
   }
 
   @override
@@ -80,29 +82,31 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
     super.dispose();
   }
 
-  Future<void> _connectMqttTcp1883() async {
-    final clientId = 'android_uv_${Random().nextInt(999999)}';
+  Future<void> _connectSecureWebSocket() async {
+    final clientId = 'uv_client_${Random().nextInt(999999)}';
 
     _client?.disconnect();
-    _client = MqttServerClient.withPort(mqttBroker, clientId, mqttPort);
+
+    if (kIsWeb) {
+      final browserClient = MqttBrowserClient.withPort(wsBroker, clientId, wsPort);
+      browserClient.websocketProtocols = MqttClientConstants.protocolsSingleDefault;
+      _client = browserClient;
+    } else {
+      final serverClient = MqttServerClient.withPort('broker.hivemq.com', clientId, wsPort);
+      serverClient.useWebSocket = true;
+      serverClient.secure = true;
+      serverClient.websocketProtocols = MqttClientConstants.protocolsSingleDefault;
+      _client = serverClient;
+    }
+
     _client!.keepAlivePeriod = 20;
-    _client!.logging(on: false);
     _client!.autoReconnect = true;
 
     _client!.onDisconnected = () {
       if (mounted && !_isSimulating) {
         setState(() {
           _isConnected = false;
-          _status = 'Disconnected — Tap Refresh to Reconnect';
-        });
-      }
-    };
-
-    _client!.onConnected = () {
-      if (mounted) {
-        setState(() {
-          _isConnected = true;
-          _status = 'Connected (Port 1883)! Topic: $mqttTopic';
+          _status = 'Disconnected — Tap Refresh';
         });
       }
     };
@@ -113,20 +117,27 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
         .withWillQos(MqttQos.atLeastOnce);
 
     try {
-      setState(() => _status = 'Connecting to $mqttBroker:$mqttPort...');
+      setState(() => _status = 'Connecting via Secure WSS (8884)...');
       await _client!.connect();
     } catch (e) {
       _client!.disconnect();
       if (mounted) {
         setState(() {
           _isConnected = false;
-          _status = 'Port 1883 Error: $e';
+          _status = 'Connection Error: Check Mobile Data/Wi-Fi';
         });
       }
       return;
     }
 
     if (_client!.connectionStatus?.state == MqttConnectionState.connected) {
+      if (mounted) {
+        setState(() {
+          _isConnected = true;
+          _status = 'Connected (Secure WSS)! Topic: $mqttTopic';
+        });
+      }
+
       _client!.subscribe(mqttTopic, MqttQos.atLeastOnce);
 
       _client!.updates!
@@ -167,7 +178,7 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
       _latestRssi = rssi;
       _packetCount++;
       if (isLive) {
-        _status = 'Live ESP32 Active (Port 1883 | Packets: $_packetCount)';
+        _status = 'Live Hardware Active (WSS | Packets: $_packetCount)';
       }
 
       _records.add(UVRecord(
@@ -192,24 +203,21 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
           final rng = Random();
           final mv = 13.0 + rng.nextDouble() * 6.0;
           final uv = mv / 100.0;
-          _addReading(mv, uv, -52, isLive: false);
+          _addReading(mv, uv, -50, isLive: false);
         });
       } else {
         _simTimer?.cancel();
         _status = _isConnected
-            ? 'Connected (Port 1883)! Topic: $mqttTopic'
+            ? 'Connected (Secure WSS)! Topic: $mqttTopic'
             : 'Demo Stopped';
       }
     });
   }
 
-  // Save & Export 3-Column CSV on Android Phone
   Future<void> _exportCsvAndroid() async {
     if (_records.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No data yet! Wait for ESP32 packet or tap Demo.'),
-        ),
+        const SnackBar(content: Text('No data yet! Wait for ESP32 packet or tap Demo.')),
       );
       return;
     }
@@ -224,22 +232,31 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
       );
     }
 
-    try {
-      final directory = await getTemporaryDirectory();
-      final fileName =
-          'uv_telemetry_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv';
-      final file = File('${directory.path}/$fileName');
-      await file.writeAsString(csv.toString());
+    if (kIsWeb) {
+      final bytes = utf8.encode(csv.toString());
+      final blob = html.Blob([bytes], 'text/csv');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      html.AnchorElement(href: url)
+        ..setAttribute('download', 'uv_log_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv')
+        ..click();
+      html.Url.revokeObjectUrl(url);
+    } else {
+      try {
+        final directory = await getTemporaryDirectory();
+        final fileName = 'uv_telemetry_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv';
+        final file = File('${directory.path}/$fileName');
+        await file.writeAsString(csv.toString());
 
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        text: 'ESP32-C3 UV Sensor 3-Column CSV Log',
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('CSV Export Error: $e')),
-      );
+        await Share.shareXFiles(
+          [XFile(file.path)],
+          text: 'ESP32-C3 UV Sensor 3-Column CSV Log',
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('CSV Export Error: $e')),
+        );
+      }
     }
   }
 
@@ -263,7 +280,7 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.tealAccent),
-            onPressed: _connectMqttTcp1883,
+            onPressed: _connectSecureWebSocket,
           ),
         ],
       ),
@@ -273,10 +290,8 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Broker Status Banner
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E293B),
                   borderRadius: BorderRadius.circular(10),
@@ -303,15 +318,12 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
                     ),
                     Text(
                       '$_latestRssi dBm',
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 12),
+                      style: const TextStyle(color: Colors.white70, fontSize: 12),
                     ),
                   ],
                 ),
               ),
               const SizedBox(height: 12),
-
-              // Live Readout Cards
               Row(
                 children: [
                   Expanded(
@@ -332,8 +344,6 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
                 ],
               ),
               const SizedBox(height: 14),
-
-              // Graph Header
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -348,8 +358,6 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
                 ],
               ),
               const SizedBox(height: 8),
-
-              // Real-Time Line Chart
               Expanded(
                 child: Container(
                   padding: const EdgeInsets.fromLTRB(10, 18, 18, 8),
@@ -360,45 +368,31 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
                   child: _records.isEmpty
                       ? const Center(
                           child: Text(
-                            'Listening on HiveMQ TCP Port 1883\nTopic: venkat_iot/sensors/uv/node_01\n\n(Or tap "Demo" at top right to test)',
+                            'Listening on Secure WSS Port 8884\nTopic: venkat_iot/sensors/uv/node_01\n\n(Or tap "Demo" at top right to test)',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: Colors.white54),
                           ),
                         )
                       : LineChart(
                           LineChartData(
-                            gridData: const FlGridData(
-                              show: true,
-                              drawVerticalLine: false,
-                            ),
+                            gridData: const FlGridData(show: true, drawVerticalLine: false),
                             borderData: FlBorderData(show: false),
                             titlesData: FlTitlesData(
-                              topTitles: const AxisTitles(
-                                sideTitles: SideTitles(showTitles: false),
-                              ),
-                              rightTitles: const AxisTitles(
-                                sideTitles: SideTitles(showTitles: false),
-                              ),
+                              topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                              rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
                               bottomTitles: AxisTitles(
                                 sideTitles: SideTitles(
                                   showTitles: true,
                                   reservedSize: 26,
-                                  interval: (_records.length > 5)
-                                      ? (_records.length / 4).floorToDouble()
-                                      : 1,
+                                  interval: (_records.length > 5) ? (_records.length / 4).floorToDouble() : 1,
                                   getTitlesWidget: (value, meta) {
                                     final idx = value.toInt();
                                     if (idx >= 0 && idx < _records.length) {
                                       return Padding(
-                                        padding:
-                                            const EdgeInsets.only(top: 6.0),
+                                        padding: const EdgeInsets.only(top: 6.0),
                                         child: Text(
-                                          DateFormat('HH:mm:ss')
-                                              .format(_records[idx].timestamp),
-                                          style: const TextStyle(
-                                            fontSize: 9,
-                                            color: Colors.white60,
-                                          ),
+                                          DateFormat('HH:mm:ss').format(_records[idx].timestamp),
+                                          style: const TextStyle(fontSize: 9, color: Colors.white60),
                                         ),
                                       );
                                     }
@@ -412,8 +406,7 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
                                 spots: _records
                                     .asMap()
                                     .entries
-                                    .map((e) => FlSpot(
-                                        e.key.toDouble(), e.value.uvIndex))
+                                    .map((e) => FlSpot(e.key.toDouble(), e.value.uvIndex))
                                     .toList(),
                                 isCurved: true,
                                 color: Colors.amberAccent,
@@ -426,8 +419,6 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
                 ),
               ),
               const SizedBox(height: 12),
-
-              // 3-Column CSV Export Button
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
@@ -467,18 +458,11 @@ class _UVAndroidHomeScreenState extends State<UVAndroidHomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
-            style: const TextStyle(color: Colors.white60, fontSize: 11),
-          ),
+          Text(title, style: const TextStyle(color: Colors.white60, fontSize: 11)),
           const SizedBox(height: 4),
           Text(
             value,
-            style: TextStyle(
-              color: color,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
+            style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold),
           ),
         ],
       ),
