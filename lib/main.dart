@@ -81,7 +81,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       final ip = _ipController.text.trim();
       setState(() => _status = 'Connecting to http://$ip/data ...');
       _fetchHardwareReading();
-      // Poll every 1 second continuously
+      // Continuous high-frequency polling every 1 second
       _pollTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
         _fetchHardwareReading();
       });
