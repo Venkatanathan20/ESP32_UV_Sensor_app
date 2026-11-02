@@ -79,9 +79,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
     if (_isLiveHardware) {
       final ip = _ipController.text.trim();
-      setState(() => _status = 'Connected (Real-time Live Stream)');
+      setState(() => _status = 'Connecting to http://$ip/data ...');
       _fetchHardwareReading();
-      // Poll every 1 second for ultra-responsive live updates
+      // Poll every 1 second continuously
       _pollTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
         _fetchHardwareReading();
       });
@@ -95,7 +95,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     try {
       final response = await http
           .get(Uri.parse('http://$ip/data'))
-          .timeout(const Duration(milliseconds: 900)); // Fast 0.9s timeout
+          .timeout(const Duration(milliseconds: 900));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -104,9 +104,17 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
         int rssi = int.tryParse(data['rssi_dbm'].toString()) ?? 0;
 
         _addReading(mv, uv, rssi, isLive: true);
+      } else {
+        if (mounted) {
+          setState(() => _status = 'HTTP Error: ${response.statusCode}');
+        }
       }
-    } catch (_) {
-      // Fail silently on single dropped frames so the graph never freezes or lags
+    } catch (e) {
+      if (mounted && _records.isEmpty) {
+        setState(() => _status = 'Connection Failed: Check IP / Wi-Fi');
+      } else if (mounted) {
+        setState(() => _status = 'Packet dropped, retrying...');
+      }
     }
   }
 
